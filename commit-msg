@@ -1,0 +1,35 @@
+#!/bin/bash
+#
+# commit-msg — Git Security Guard
+#
+# Enforces the Conventional Commits specification on every commit
+# message:
+#
+#   <type>(optional-scope): <description>
+#
+# Allowed types: feat, fix, docs, style, refactor, test, chore, ci,
+#                 perf, build, revert
+#
+# To bypass in an emergency (NOT recommended):
+#   git commit --no-verify
+#
+
+RED='\033[0;31m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+MSG_FILE="$1"
+MSG=$(cat "$MSG_FILE")
+
+PATTERN='^(feat|fix|docs|style|refactor|test|chore|ci|perf|build|revert)(\(.+\))?: .{1,72}$'
+
+if ! echo "$MSG" | grep -qE "$PATTERN"; then
+  echo -e "${RED}${BOLD}[BLOCKED]${NC} ${RED}Commit message must follow Conventional Commits format.${NC}"
+  echo "  Examples: feat: add login page"
+  echo "            fix(auth): resolve token expiry bug"
+  echo "  Allowed types: feat, fix, docs, style, refactor, test, chore, ci, perf, build, revert"
+  echo "  Your message: '$MSG'"
+  exit 1
+fi
+
+exit 0
