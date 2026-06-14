@@ -1,0 +1,131 @@
+#!/bin/bash
+#
+# pre-commit — Git Security Guard
+#
+# Scans all staged files for common secret patterns before allowing a
+# commit to proceed. Any match blocks the commit (exit code 1).
+#
+# Detected patterns:
+#   - AWS Access Key IDs
+#   - Private key headers (PEM-style)
+#   - Hardcoded password assignments
+#   - JWT tokens
+#
+# To bypass in an emergency (NOT recommended):
+#   git commit --no-verify
+#
+
+# ---------------------------------------------------------------------------
+# Colors
+# ---------------------------------------------------------------------------
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+GREEN='\033[0;32m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# ---------------------------------------------------------------------------
+# Patterns
+# ---------------------------------------------------------------------------
+AWS_KEY_PATTERN='AKIA[0-9A-Z]{16}'
+PRIVATE_KEY_PATTERN='-----BEGIN'
+PASSWORD_PATTERN='password[[:space:]]*=[[:space:]]*['\''"][^'\''"]+['\''"]'
+JWT_PATTERN='eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+'
+
+# ---------------------------------------------------------------------------
+# Get staged files (added, copied, modified — ignore deletions)
+# ---------------------------------------------------------------------------
+if git rev-parse --verify HEAD >/dev/null 2>&1; then
+    AGAINST=HEAD
+else
+    # No commits yet — diff against the empty tree
+    AGAINST=$(git hash-object -t tree /dev/null)
+fi
+
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM "$AGAINST")
+
+if [ -z "$STAGED_FILES" ]; then
+    exit 0
+fi
+
+echo "🔍 Running pre-commit security scan..."
+echo ""
+
+VIOLATIONS=0
+
+while IFS= read -r FILE; do
+    [ -z "$FILE" ] && continue
+
+    # Get the staged version of the file (what will actually be committed)
+    CONTENT=$(git show ":${FILE}" 2>/dev/null)
+
+    # Skip files that look binary (avoids noisy/garbled grep output)
+    if printf '%s' "$CONTENT" | grep -qP '\x00' 2>/dev/null; then
+        continue
+    fi
+
+    FILE_FLAGGED=0
+
+    # --- AWS Access Keys -----------------------------------------------
+    MATCHES=$(printf '%s\n' "$CONTENT" | grep -nE -- "$AWS_KEY_PATTERN")
+    if [ -n "$MATCHES" ]; then
+        echo -e "${RED}${BOLD}[BLOCKED]${NC} ${RED}Possible AWS access key in ${FILE}${NC}"
+        echo "$MATCHES" | sed 's/^/    /'
+        VIOLATIONS=1
+        FILE_FLAGGED=1
+    fi
+
+    # --- Private keys ----------------------------------------------------
+    MATCHES=$(printf '%s\n' "$CONTENT" | grep -nE -- "$PRIVATE_KEY_PATTERN")
+    if [ -n "$MATCHES" ]; then
+        echo -e "${RED}${BOLD}[BLOCKED]${NC} ${RED}Possible private key in ${FILE}${NC}"
+        echo "$MATCHES" | sed 's/^/    /'
+        VIOLATIONS=1
+        FILE_FLAGGED=1
+    fi
+
+    # --- Hardcoded passwords --------------------------------------------
+    MATCHES=$(printf '%s\n' "$CONTENT" | grep -niE -- "$PASSWORD_PATTERN")
+    if [ -n "$MATCHES" ]; then
+        echo -e "${YELLOW}${BOLD}[WARNING]${NC} ${YELLOW}Possible hardcoded password in ${FILE}${NC}"
+        echo "$MATCHES" | sed 's/^/    /'
+        VIOLATIONS=1
+        FILE_FLAGGED=1
+    fi
+
+    # --- JWT tokens --------------------------------------------------------
+    MATCHES=$(printf '%s\n' "$CONTENT" | grep -nE -- "$JWT_PATTERN")
+    if [ -n "$MATCHES" ]; then
+        echo -e "${YELLOW}${BOLD}[WARNING]${NC} ${YELLOW}Possible JWT token in ${FILE}${NC}"
+        echo "$MATCHES" | sed 's/^/    /'
+        VIOLATIONS=1
+        FILE_FLAGGED=1
+    fi
+
+    [ "$FILE_FLAGGED" -eq 1 ] && echo ""
+done <<< "$STAGED_FILES"
+
+# ---------------------------------------------------------------------------
+# Result
+# ---------------------------------------------------------------------------
+# Extra layer: if git-secrets is installed and registered for this repo
+# (e.g. via install_hooks.sh), run it too. It catches things our simple
+# regexes don't (AWS secret access keys, account IDs, custom org patterns).
+if command -v git-secrets >/dev/null 2>&1 && git config --get secrets.providers >/dev/null 2>&1; then
+    if ! git secrets --pre_commit_hook -- 2>/tmp/git-secrets-output; then
+        echo -e "${RED}${BOLD}[BLOCKED]${NC} ${RED}git-secrets detected a prohibited pattern:${NC}"
+        sed 's/^/    /' /tmp/git-secrets-output
+        VIOLATIONS=1
+    fi
+    rm -f /tmp/git-secrets-output
+fi
+
+if [ "$VIOLATIONS" -eq 1 ]; then
+    echo -e "${RED}${BOLD}✖ Commit blocked: potential secret(s) detected above.${NC}"
+    echo -e "  Remove the secret(s) and re-stage the file before committing."
+    echo -e "  If this is a false positive, bypass with: ${BOLD}git commit --no-verify${NC} (use sparingly)"
+    exit 1
+fi
+
+echo -e "${GREEN}✓ No secrets detected. Proceeding with commit.${NC}"
+exit 0
